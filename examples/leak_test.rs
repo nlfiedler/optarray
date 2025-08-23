@@ -1,7 +1,7 @@
 //
 // Copyright (c) 2025 Nathan Fiedler
 //
-use raots::OptimalArray;
+use optarray::OptimalArray;
 
 //
 // Create and drop collections and iterators in order to test for memory leaks.

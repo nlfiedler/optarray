@@ -1,7 +1,7 @@
 //
 // Copyright (c) 2025 Nathan Fiedler
 //
-use raots::OptimalArray;
+use optarray::OptimalArray;
 use std::time::Instant;
 
 //
