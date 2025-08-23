@@ -3,13 +3,37 @@
 //
 
 #![allow(dead_code)]
-use std::alloc::{Layout, alloc, handle_alloc_error};
+use std::alloc::{Layout, alloc, dealloc, handle_alloc_error};
 use std::fmt;
 use std::ops::{Index, IndexMut};
 
 /// USIZE_BITS is the number of bits in a usize, which is used to determine a
 /// value for `k` for a given zero-based index `i` into the array.
 const USIZE_BITS: u32 = (8 * std::mem::size_of::<usize>()) as u32;
+
+/// The highest numbered data block for each superblock and the corresponding
+/// capacity of data block within that superblock. Computing this would be a
+/// challenge given how many steps are involved to go from k to p, b, and e in
+/// the locate function.
+const BLOCK_SIZES: [(usize, usize); 17] = [
+    (1, 1),
+    (4, 2),
+    (10, 4),
+    (22, 8),
+    (46, 16),
+    (94, 32),
+    (190, 64),
+    (382, 128),
+    (766, 256),
+    (1534, 512),
+    (3070, 1024),
+    (6142, 2048),
+    (12286, 4096),
+    (24574, 8192),
+    (49150, 16384),
+    (98302, 32768),
+    (131070, 65536),
+];
 
 /// Compute the data block and element offsets (0-based) within the array for
 /// the element identified by the zero-based index `i`.
@@ -53,6 +77,16 @@ fn datablock_capacity(k: usize) -> usize {
     1 << k.div_ceil(2)
 }
 
+/// Determine the capacity for the data block at index d.
+fn datablock_capacity_for_block(block: usize) -> usize {
+    for (max, len) in BLOCK_SIZES {
+        if block < max {
+            return len;
+        }
+    }
+    panic!("overflow, block out of bounds")
+}
+
 /// Compute the number of data blocks that superblock k can hold.
 #[inline]
 fn superblock_capacity(k: usize) -> usize {
@@ -61,18 +95,26 @@ fn superblock_capacity(k: usize) -> usize {
     1 << ((k + 1).div_ceil(2) - 1)
 }
 
+/// Compute the number of data blocks that appear before superblock k.
+#[inline]
+fn blocks_before_super(k: usize) -> usize {
+    (1 << (k / 2)) + (1 << k.div_ceil(2)) - 2
+}
+
 /// Compute the capacity for an array with `s` superblocks and `d` data blocks.
 fn array_capacity(s: usize, d: usize) -> usize {
     if s == 0 {
+        // array is completely empty, math fails here
         0
     } else {
         let k = s - 1;
         // compute the number of data blocks before superblock k
-        let leading_db = (1 << (k / 2)) + (1 << k.div_ceil(2)) - 2;
+        let leading_blocks = blocks_before_super(k);
         // compute the element capacity prior to superblock k
         let leading_capacity = (1 << k) - 1;
-        let db_capacity = datablock_capacity(k);
-        (d - leading_db) * db_capacity + leading_capacity
+        let block_capacity = datablock_capacity(k);
+        // compute capacity of allocated blocks in this superblock
+        (d - leading_blocks) * block_capacity + leading_capacity
     }
 }
 
@@ -151,7 +193,7 @@ impl<T> OptimalArray<T> {
                 // ii. Allocate a new data block, add to index block
                 //
                 // overflowing the allocator is very unlikely as the item size would
-                // have to be very large (the longest segment will be 65,536 items)
+                // have to be very large (the longest block will be 65,536 items)
                 let layout =
                     Layout::array::<T>(self.last_db_capacity).expect("unexpected overflow");
                 unsafe {
@@ -201,47 +243,26 @@ impl<T> OptimalArray<T> {
     /// Constant time.
     pub fn pop(&mut self) -> Option<T> {
         if self.n > 0 {
-            // Shrink, from Algorithm 2 of Broknik 1999 paper
-            //
-            // 1. Decrement n and num elements in last non-empty data block
-            self.n -= 1;
-            self.last_db_length -= 1;
-            // 2. If last data block is empty
-            if self.last_db_length == 0 {
-                // (a) If there is another empty data block, Deallocate it
-                if self.empty == 1 {
-                    // the algorithms never explicitly set this flag nor say how
-                    // to handle the extra empty block except in this step
-                    todo!("where do we find this extra empty block?")
-                }
-                // (b) If the index block is quarter full, shrink to half
-                if self.index.len() * 4 <= self.index.capacity() {
-                    self.index.shrink_to(self.index.capacity() / 2);
-                }
-                // (c) Decrement d and num data blocks in last superblock
-                self.d -= 1;
-                self.last_sb_length -= 1;
-                // (d) If last superblock is empty
-                if self.last_sb_length == 0 {
-                    // i. Decrement s
-                    self.s -= 1;
-                    // ii. If s is even, half num data blocks in superblock
-                    // iii. Else, halve num elements in data block
-                    if self.s == 0 {
-                        self.last_sb_capacity = 0;
-                        self.last_db_capacity = 0;
-                    } else {
-                        self.last_sb_capacity = superblock_capacity(self.s - 1);
-                        self.last_db_capacity = datablock_capacity(self.s - 1);
-                    }
-                    // iv. Set occupancy of last superblock to full
-                    self.last_sb_length = self.last_sb_capacity;
-                }
-                // (e) Set occupancy of last data block to full
-                self.last_db_length = self.last_db_capacity;
-            }
+            self.shrink();
             let (block, slot) = locate(self.n);
             unsafe { Some((self.index[block].add(slot)).read()) }
+        } else {
+            None
+        }
+    }
+
+    /// Removes and returns the last element from a vector if the predicate
+    /// returns true, or None if the predicate returns false or the vector is
+    /// empty (the predicate will not be called in that case).
+    ///
+    /// # Time complexity
+    ///
+    /// Constant time.
+    pub fn pop_if(&mut self, predicate: impl FnOnce(&mut T) -> bool) -> Option<T> {
+        if self.n == 0 {
+            None
+        } else if let Some(last) = self.get_mut(self.n - 1) {
+            if predicate(last) { self.pop() } else { None }
         } else {
             None
         }
@@ -303,6 +324,36 @@ impl<T> OptimalArray<T> {
         }
     }
 
+    /// Removes an element from the vector and returns it.
+    ///
+    /// The removed element is replaced by the last element of the vector.
+    ///
+    /// This does not preserve ordering of the remaining elements.
+    ///
+    /// # Time complexity
+    ///
+    /// Constant time.
+    pub fn swap_remove(&mut self, index: usize) -> T {
+        if index >= self.n {
+            panic!(
+                "swap_remove index (is {index}) should be < len (is {})",
+                self.n
+            );
+        }
+        // retreive the value at index before overwriting
+        let (block, slot) = locate(index);
+        unsafe {
+            let index_ptr = self.index[block].add(slot);
+            let value = index_ptr.read();
+            // find the pointer of the last element and copy to index pointer
+            let (block, slot) = locate(self.n - 1);
+            let last_ptr = self.index[block].add(slot);
+            std::ptr::copy(last_ptr, index_ptr, 1);
+            self.shrink();
+            value
+        }
+    }
+
     /// Returns an iterator over the array.
     ///
     /// The iterator yields all items from start to end.
@@ -310,6 +361,112 @@ impl<T> OptimalArray<T> {
         OptArrayIter {
             array: self,
             index: 0,
+        }
+    }
+
+    /// Clears the extensible array, removing and dropping all values and
+    /// deallocating all previously allocated segments.
+    ///
+    /// # Time complexity
+    ///
+    /// O(n) if elements are droppable, otherwise O(sqrt(n))
+    pub fn clear(&mut self) {
+        use std::ptr::{drop_in_place, slice_from_raw_parts_mut};
+
+        if self.n > 0 {
+            // find the last block that contains values and drop them
+            let (last_block, last_slot) = locate(self.n - 1);
+            if std::mem::needs_drop::<T>() {
+                unsafe {
+                    // last_slot is pointing at the last element, need to add
+                    // one to include it in the slice
+                    drop_in_place(slice_from_raw_parts_mut(
+                        self.index[last_block],
+                        last_slot + 1,
+                    ));
+                }
+            }
+            // deallocate the last data block
+            let block_len = self.last_db_capacity;
+            let layout = Layout::array::<T>(block_len).expect("unexpected overflow");
+            unsafe {
+                dealloc(self.index[last_block] as *mut u8, layout);
+            }
+
+            // drop the values in all of the preceding data blocks
+            let mut block = 0;
+            for k in 0..self.s {
+                let level_limit = blocks_before_super(k + 1);
+                let block_len = datablock_capacity(k);
+                while block < level_limit && block < last_block {
+                    if std::mem::needs_drop::<T>() {
+                        unsafe {
+                            drop_in_place(slice_from_raw_parts_mut(self.index[block], block_len));
+                        }
+                    }
+                    let layout = Layout::array::<T>(block_len).expect("unexpected overflow");
+                    unsafe {
+                        dealloc(self.index[block] as *mut u8, layout);
+                    }
+                    block += 1;
+                }
+            }
+            // TODO: what about the extra empty block?
+
+            self.index.clear();
+            self.n = 0;
+            self.s = 0;
+            self.d = 0;
+            self.empty = 0;
+            self.last_db_length = 0;
+            self.last_db_capacity = 0;
+            self.last_sb_length = 0;
+            self.last_sb_capacity = 0;
+        }
+    }
+
+    /// Decrease the number of elements by one and adjust everything to reflect
+    /// the reduced length of the array, possibly deallocating data blocks and
+    /// shrinking the index.
+    fn shrink(&mut self) {
+        // Shrink, from Algorithm 2 of Broknik 1999 paper
+        //
+        // 1. Decrement n and num elements in last non-empty data block
+        self.n -= 1;
+        self.last_db_length -= 1;
+        // 2. If last data block is empty
+        if self.last_db_length == 0 {
+            // (a) If there is another empty data block, Deallocate it
+            if self.empty == 1 {
+                // the algorithms never explicitly set this flag nor say how to
+                // handle the extra empty block except in this step
+                todo!("where do we find this extra empty block?")
+            }
+            // (b) If the index block is quarter full, shrink to half
+            if self.index.len() * 4 <= self.index.capacity() {
+                self.index.shrink_to(self.index.capacity() / 2);
+            }
+            // (c) Decrement d and num data blocks in last superblock
+            self.d -= 1;
+            self.last_sb_length -= 1;
+            // (d) If last superblock is empty
+            if self.last_sb_length == 0 {
+                // i. Decrement s
+                self.s -= 1;
+                // ii. If s is even, half num data blocks in superblock
+                // iii. Else, halve num elements in data block
+                if self.s == 0 {
+                    self.last_sb_capacity = 0;
+                    self.last_db_capacity = 0;
+                } else {
+                    self.last_sb_capacity = superblock_capacity(self.s - 1);
+                    self.last_db_capacity = datablock_capacity(self.s - 1);
+                }
+                // iv. Set occupancy of last superblock to full
+                self.last_sb_length = self.last_sb_capacity;
+            }
+            // (e) Set occupancy of last data block to full
+            self.last_db_length = self.last_db_capacity;
         }
     }
 }
@@ -337,6 +494,12 @@ impl<T> fmt::Display for OptimalArray<T> {
     }
 }
 
+impl<T> Drop for OptimalArray<T> {
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
+
 impl<T> Index<usize> for OptimalArray<T> {
     type Output = T;
 
@@ -357,6 +520,16 @@ impl<T> IndexMut<usize> for OptimalArray<T> {
     }
 }
 
+impl<A> FromIterator<A> for OptimalArray<A> {
+    fn from_iter<T: IntoIterator<Item = A>>(iter: T) -> Self {
+        let mut arr: OptimalArray<A> = OptimalArray::new();
+        for value in iter {
+            arr.push(value)
+        }
+        arr
+    }
+}
+
 /// Immutable array iterator.
 pub struct OptArrayIter<'a, T> {
     array: &'a OptimalArray<T>,
@@ -373,6 +546,117 @@ impl<'a, T> Iterator for OptArrayIter<'a, T> {
     }
 }
 
+impl<T> IntoIterator for OptimalArray<T> {
+    type Item = T;
+    type IntoIter = OptArrayIntoIter<Self::Item>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        let mut me = std::mem::ManuallyDrop::new(self);
+        let dope = std::mem::take(&mut me.index);
+        OptArrayIntoIter {
+            index: 0,
+            n: me.n,
+            d: me.d,
+            s: me.s,
+            dope,
+        }
+    }
+}
+
+/// An iterator that moves out of an optimal array.
+pub struct OptArrayIntoIter<T> {
+    /// offset into the array
+    index: usize,
+    /// count of elements in array
+    n: usize,
+    /// number of superblocks
+    s: usize,
+    /// number of data blocks
+    d: usize,
+    /// data block index
+    dope: Vec<*mut T>,
+}
+
+impl<T> Iterator for OptArrayIntoIter<T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index < self.n {
+            let (block, slot) = locate(self.index);
+            self.index += 1;
+            unsafe { Some((self.dope[block].add(slot)).read()) }
+        } else {
+            None
+        }
+    }
+}
+
+impl<T> Drop for OptArrayIntoIter<T> {
+    fn drop(&mut self) {
+        use std::ptr::{drop_in_place, slice_from_raw_parts_mut};
+
+        if std::mem::needs_drop::<T>() {
+            let (first_block, first_slot) = locate(self.index);
+            let (last_block, last_slot) = locate(self.n - 1);
+            if first_block == last_block {
+                // special-case, remaining values are in only one segment
+                if first_slot < last_slot {
+                    unsafe {
+                        // last_slot is pointing at the last element, need to
+                        // add one to include it in the slice
+                        drop_in_place(slice_from_raw_parts_mut(
+                            self.dope[first_block].add(first_slot),
+                            last_slot - first_slot + 1,
+                        ));
+                    }
+                }
+            } else {
+                // drop the remaining values in the first block
+                let block_len = datablock_capacity_for_block(first_block);
+                if block_len < self.n {
+                    unsafe {
+                        drop_in_place(slice_from_raw_parts_mut(
+                            self.dope[first_block].add(first_slot),
+                            block_len - first_slot,
+                        ));
+                    }
+                }
+
+                // drop the values in the last block
+                unsafe {
+                    drop_in_place(slice_from_raw_parts_mut(
+                        self.dope[last_block],
+                        last_slot + 1,
+                    ));
+                }
+
+                // drop the values in all of the other blocks
+                for block in first_block + 1..last_block {
+                    let block_len = datablock_capacity_for_block(block);
+                    unsafe {
+                        drop_in_place(slice_from_raw_parts_mut(self.dope[block], block_len));
+                    }
+                }
+            }
+        }
+
+        // deallocate all of the data blocks
+        for block in 0..self.dope.len() {
+            let block_len = datablock_capacity_for_block(block);
+            let layout = Layout::array::<T>(block_len).expect("unexpected overflow");
+            unsafe {
+                dealloc(self.dope[block] as *mut u8, layout);
+            }
+        }
+
+        self.dope.clear();
+        self.index = 0;
+        self.n = 0;
+        self.s = 0;
+        self.d = 0;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,10 +666,8 @@ mod tests {
         let mut sut: OptimalArray<u64> = OptimalArray::new();
         assert_eq!(sut.len(), 0);
         assert!(sut.is_empty());
-        println!("sut: {sut}");
         for value in 0..63 {
             sut.push(value);
-            println!("sut: {sut}");
         }
         assert_eq!(sut.len(), 63);
         assert!(!sut.is_empty());
@@ -396,6 +678,29 @@ mod tests {
         assert_eq!(sut.get(15), Some(&15));
         assert_eq!(sut.get(30), Some(&30));
         assert_eq!(sut.get(62), Some(&62));
+        let missing = sut.get(101);
+        assert!(missing.is_none());
+    }
+
+    #[test]
+    fn test_push_get_several_strings() {
+        let inputs = [
+            "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+        ];
+        let mut sut: OptimalArray<String> = OptimalArray::new();
+        for item in inputs {
+            sut.push(item.to_owned());
+        }
+        assert_eq!(sut.len(), 9);
+        for (idx, item) in inputs.iter().enumerate() {
+            let maybe = sut.get(idx);
+            assert!(maybe.is_some(), "{idx} is none");
+            let actual = maybe.unwrap();
+            assert_eq!(item, actual);
+        }
+        let maybe = sut.get(10);
+        assert!(maybe.is_none());
+        assert_eq!(sut[3], "four");
     }
 
     #[test]
@@ -479,6 +784,105 @@ mod tests {
     }
 
     #[test]
+    fn test_clear_and_reuse_tiny() {
+        // clear an array that allocated only one segment
+        let mut sut: OptimalArray<String> = OptimalArray::new();
+        sut.push(String::from("one"));
+        assert_eq!(sut.len(), 1);
+        sut.clear();
+        assert_eq!(sut.len(), 0);
+        sut.push(String::from("two"));
+        assert_eq!(sut.len(), 1);
+        // implicitly drop()
+    }
+
+    #[test]
+    fn test_clear_and_reuse_ints() {
+        let mut sut: OptimalArray<i32> = OptimalArray::new();
+        for value in 0..512 {
+            sut.push(value);
+        }
+        assert_eq!(sut.len(), 512);
+        sut.clear();
+        assert_eq!(sut.len(), 0);
+        for value in 0..512 {
+            sut.push(value);
+        }
+        for idx in 0..512 {
+            let maybe = sut.get(idx);
+            assert!(maybe.is_some(), "{idx} is none");
+            let actual = maybe.unwrap();
+            assert_eq!(idx, *actual as usize);
+        }
+    }
+
+    #[test]
+    fn test_clear_and_reuse_strings() {
+        let mut sut: OptimalArray<String> = OptimalArray::new();
+        for _ in 0..512 {
+            let value = ulid::Ulid::new().to_string();
+            sut.push(value);
+        }
+        assert_eq!(sut.len(), 512);
+        sut.clear();
+        assert_eq!(sut.len(), 0);
+        for _ in 0..512 {
+            let value = ulid::Ulid::new().to_string();
+            sut.push(value);
+        }
+        assert_eq!(sut.len(), 512);
+        // implicitly drop()
+    }
+
+    #[test]
+    fn test_push_get_thousands_structs() {
+        struct MyData {
+            a: u64,
+            b: i32,
+        }
+        let mut sut: OptimalArray<MyData> = OptimalArray::new();
+        for value in 0..88_888i32 {
+            sut.push(MyData {
+                a: value as u64,
+                b: value,
+            });
+        }
+        assert_eq!(sut.len(), 88_888);
+        for idx in 0..88_888i32 {
+            let maybe = sut.get(idx as usize);
+            assert!(maybe.is_some(), "{idx} is none");
+            let actual = maybe.unwrap();
+            assert_eq!(idx as u64, actual.a);
+            assert_eq!(idx, actual.b);
+        }
+    }
+
+    #[test]
+    fn test_push_get_many_instances_ints() {
+        // test allocating, filling, and then dropping many instances
+        for _ in 0..1_000 {
+            let mut sut: OptimalArray<usize> = OptimalArray::new();
+            for value in 0..10_000 {
+                sut.push(value);
+            }
+            assert_eq!(sut.len(), 10_000);
+        }
+    }
+
+    #[test]
+    fn test_push_get_many_instances_strings() {
+        // test allocating, filling, and then dropping many instances
+        for _ in 0..1_000 {
+            let mut sut: OptimalArray<String> = OptimalArray::new();
+            for _ in 0..1_000 {
+                let value = ulid::Ulid::new().to_string();
+                sut.push(value);
+            }
+            assert_eq!(sut.len(), 1_000);
+        }
+    }
+
+    #[test]
     fn test_array_iterator() {
         let inputs = [
             "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
@@ -539,6 +943,150 @@ mod tests {
     }
 
     #[test]
+    fn test_pop_if() {
+        let mut sut: OptimalArray<u32> = OptimalArray::new();
+        assert!(sut.pop_if(|_| panic!("should not be called")).is_none());
+        for value in 0..10 {
+            sut.push(value);
+        }
+        assert!(sut.pop_if(|_| false).is_none());
+        let maybe = sut.pop_if(|v| *v == 9);
+        assert_eq!(maybe.unwrap(), 9);
+        assert!(sut.pop_if(|v| *v == 9).is_none());
+    }
+
+    #[test]
+    fn test_array_fromiterator() {
+        let mut inputs: Vec<i32> = Vec::new();
+        for value in 0..10_000 {
+            inputs.push(value);
+        }
+        let sut: OptimalArray<i32> = inputs.into_iter().collect();
+        assert_eq!(sut.len(), 10_000);
+        for idx in 0..10_000i32 {
+            let maybe = sut.get(idx as usize);
+            assert!(maybe.is_some(), "{idx} is none");
+            let actual = maybe.unwrap();
+            assert_eq!(idx, *actual);
+        }
+    }
+
+    #[test]
+    fn test_push_get_many_ints() {
+        let mut sut: OptimalArray<i32> = OptimalArray::new();
+        for value in 0..1_000_000 {
+            sut.push(value);
+        }
+        assert_eq!(sut.len(), 1_000_000);
+        for idx in 0..1_000_000 {
+            let maybe = sut.get(idx);
+            assert!(maybe.is_some(), "{idx} is none");
+            let actual = maybe.unwrap();
+            assert_eq!(idx, *actual as usize);
+        }
+        assert_eq!(sut[99_999], 99_999);
+    }
+
+    #[test]
+    fn test_array_intoiterator() {
+        // an array that only requires a single segment
+        let inputs = [
+            "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+        ];
+        let mut sut: OptimalArray<String> = OptimalArray::new();
+        for item in inputs {
+            sut.push(item.to_owned());
+        }
+        for (idx, elem) in sut.into_iter().enumerate() {
+            assert_eq!(inputs[idx], elem);
+        }
+        // sut.len(); // error: ownership of sut was moved
+    }
+
+    #[test]
+    fn test_array_intoiterator_drop_tiny() {
+        // an array that only requires a single segment and only some need to be
+        // dropped after partially iterating the values
+        let inputs = [
+            "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+        ];
+        let mut sut: OptimalArray<String> = OptimalArray::new();
+        for item in inputs {
+            sut.push(item.to_owned());
+        }
+        for (idx, _) in sut.into_iter().enumerate() {
+            if idx > 2 {
+                break;
+            }
+        }
+        // implicitly drop()
+    }
+
+    #[test]
+    fn test_array_intoiterator_drop_large() {
+        // by adding 512 values and iterating less than 64 times, there will be
+        // values in the first segment and some in the last segment, and two
+        // segments inbetween that all need to be dropped
+        let mut sut: OptimalArray<String> = OptimalArray::new();
+        for _ in 0..512 {
+            let value = ulid::Ulid::new().to_string();
+            sut.push(value);
+        }
+        for (idx, _) in sut.into_iter().enumerate() {
+            if idx >= 30 {
+                break;
+            }
+        }
+        // implicitly drop()
+    }
+
+    #[test]
+    fn test_swap_remove_single_segment() {
+        let mut sut: OptimalArray<u32> = OptimalArray::new();
+        sut.push(1);
+        assert_eq!(sut.len(), 1);
+        let one = sut.swap_remove(0);
+        assert_eq!(one, 1);
+        assert_eq!(sut.len(), 0);
+    }
+
+    #[test]
+    fn test_swap_remove_multiple_segments() {
+        let mut sut: OptimalArray<u32> = OptimalArray::new();
+        for value in 0..512 {
+            sut.push(value);
+        }
+        assert_eq!(sut.len(), 512);
+        let eighty = sut.swap_remove(80);
+        assert_eq!(eighty, 80);
+        assert_eq!(sut.pop(), Some(510));
+        assert_eq!(sut[80], 511);
+    }
+
+    #[test]
+    #[should_panic(expected = "swap_remove index (is 0) should be < len (is 0)")]
+    fn test_swap_remove_panic_empty() {
+        let mut sut: OptimalArray<u32> = OptimalArray::new();
+        sut.swap_remove(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "swap_remove index (is 1) should be < len (is 1)")]
+    fn test_swap_remove_panic_range_edge() {
+        let mut sut: OptimalArray<u32> = OptimalArray::new();
+        sut.push(1);
+        sut.swap_remove(1);
+    }
+
+    #[test]
+    #[should_panic(expected = "swap_remove index (is 2) should be < len (is 1)")]
+    fn test_swap_remove_panic_range_exceed() {
+        let mut sut: OptimalArray<u32> = OptimalArray::new();
+        sut.push(1);
+        sut.swap_remove(2);
+    }
+
+    #[test]
     fn test_locate() {
         assert_eq!(locate(0), (0, 0));
         assert_eq!(locate(1), (1, 0));
@@ -563,6 +1111,41 @@ mod tests {
         assert_eq!(locate(62), (13, 7));
         // 126 is last cell of last data block of superblock 6
         assert_eq!(locate(126), (21, 7));
+    }
+
+    #[test]
+    fn test_datablock_capacity_for_block() {
+        assert_eq!(datablock_capacity_for_block(0), 1);
+        assert_eq!(datablock_capacity_for_block(1), 2);
+        assert_eq!(datablock_capacity_for_block(2), 2);
+        assert_eq!(datablock_capacity_for_block(3), 2);
+        assert_eq!(datablock_capacity_for_block(4), 4);
+        assert_eq!(datablock_capacity_for_block(5), 4);
+        assert_eq!(datablock_capacity_for_block(6), 4);
+        assert_eq!(datablock_capacity_for_block(7), 4);
+        assert_eq!(datablock_capacity_for_block(8), 4);
+        assert_eq!(datablock_capacity_for_block(9), 4);
+        assert_eq!(datablock_capacity_for_block(10), 8);
+        assert_eq!(datablock_capacity_for_block(11), 8);
+        assert_eq!(datablock_capacity_for_block(30), 16);
+        assert_eq!(datablock_capacity_for_block(80), 32);
+        assert_eq!(datablock_capacity_for_block(170), 64);
+        assert_eq!(datablock_capacity_for_block(350), 128);
+        assert_eq!(datablock_capacity_for_block(707), 256);
+        assert_eq!(datablock_capacity_for_block(1400), 512);
+        assert_eq!(datablock_capacity_for_block(3000), 1024);
+        assert_eq!(datablock_capacity_for_block(6000), 2048);
+        assert_eq!(datablock_capacity_for_block(12000), 4096);
+        assert_eq!(datablock_capacity_for_block(24000), 8192);
+        assert_eq!(datablock_capacity_for_block(49000), 16384);
+        assert_eq!(datablock_capacity_for_block(98000), 32768);
+        assert_eq!(datablock_capacity_for_block(100001), 65536);
+    }
+
+    #[test]
+    #[should_panic(expected = "overflow, block out of bounds")]
+    fn test_datablock_capacity_for_block_bounds() {
+        datablock_capacity_for_block(150_000);
     }
 
     #[test]

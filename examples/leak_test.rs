@@ -33,27 +33,25 @@ fn main() {
     }
     drop(array);
 
-    // TODO: test IntoIterator
+    // IntoIterator: add only enough values to allocate one segment
+    let mut array: OptimalArray<String> = OptimalArray::new();
+    let value = ulid::Ulid::new().to_string();
+    array.push(value);
+    let itty = array.into_iter();
+    drop(itty);
 
-    // // IntoIterator: add only enough values to allocate one segment
-    // let mut array: OptimalArray<String> = OptimalArray::new();
-    // let value = ulid::Ulid::new().to_string();
-    // array.push(value);
-    // let itty = array.into_iter();
-    // drop(itty);
-
-    // // IntoIterator: add enough values to allocate a bunch of segments
-    // let mut array: OptimalArray<String> = OptimalArray::new();
-    // for _ in 0..250 {
-    //     let value = ulid::Ulid::new().to_string();
-    //     array.push(value);
-    // }
-    // // skip enough elements to pass over a few segments then drop
-    // for (index, value) in array.into_iter().skip(28).enumerate() {
-    //     if index == 28 {
-    //         println!("28: {value}");
-    //         // exit the iterator early intentionally
-    //         break;
-    //     }
-    // }
+    // IntoIterator: add enough values to allocate a bunch of segments
+    let mut array: OptimalArray<String> = OptimalArray::new();
+    for _ in 0..250 {
+        let value = ulid::Ulid::new().to_string();
+        array.push(value);
+    }
+    // skip enough elements to pass over a few segments then drop
+    for (index, value) in array.into_iter().skip(28).enumerate() {
+        if index == 28 {
+            println!("28: {value}");
+            // exit the iterator early intentionally
+            break;
+        }
+    }
 }

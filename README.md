@@ -13,6 +13,8 @@ This data structure supports `push` and `pop` operations and does _not_ support 
 
 Compared to the `Vec` type in the Rust standard library, this data structure will have substantially less unused space, on the order of O(√N). The index block contributes to the overhead of this data structure, and that is on the order of O(√N). Based on the current implementation of `Vec`, as much as 50% of the space may be unused since it has a growth factor of 2. The [Segment Array]((https://github.com/nlfiedler/segarray)) has the same growth factor as `Vec` and potentially the same proportion of unused space (its index block is a fixed size).
 
+This data structure will grow and shrink as needed. That is, as `push()` is called, new data blocks will be allocated to contain the new elements. Meanwhile, `pop()` will deallocate data blocks as they become empty.
+
 ## Examples
 
 A simple example copied from the unit tests.
