@@ -12,33 +12,42 @@ fn main() {
     let mut array: OptimalArray<String> = OptimalArray::new();
     let value = ulid::Ulid::new().to_string();
     array.push(value);
-    drop(array);
 
-    // add enough values to allocate a bunch of segments
+    // add enough values to allocate a few segments
     let mut array: OptimalArray<String> = OptimalArray::new();
     for _ in 0..12 {
         let value = ulid::Ulid::new().to_string();
         array.push(value);
     }
-    drop(array);
+
+    // push a bunch, pop a few, push more to test Grow/Shrink handling of the
+    // extra empty data block
+    let mut array: OptimalArray<u64> = OptimalArray::new();
+    for value in 0..35 {
+        array.push(value);
+    }
+    for _ in 0..10 {
+        array.pop();
+    }
+    for value in 0..12 {
+        array.push(value);
+    }
 
     // test pushing many elements then popping all of them
     let mut array: OptimalArray<String> = OptimalArray::new();
-    for _ in 0..100 {
+    for _ in 0..512 {
         let value = ulid::Ulid::new().to_string();
         array.push(value);
     }
     while !array.is_empty() {
         array.pop();
     }
-    drop(array);
 
     // IntoIterator: add only enough values to allocate one segment
     let mut array: OptimalArray<String> = OptimalArray::new();
     let value = ulid::Ulid::new().to_string();
     array.push(value);
-    let itty = array.into_iter();
-    drop(itty);
+    let _ = array.into_iter();
 
     // IntoIterator: add enough values to allocate a bunch of segments
     let mut array: OptimalArray<String> = OptimalArray::new();
