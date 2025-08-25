@@ -633,7 +633,7 @@ impl<T> Drop for OptArrayIntoIter<T> {
             let (last_block, last_slot) = locate(self.n - 1);
             if first_block == last_block {
                 // special-case, remaining values are in only one segment
-                if first_slot < last_slot {
+                if first_slot <= last_slot {
                     unsafe {
                         // last_slot is pointing at the last element, need to
                         // add one to include it in the slice
