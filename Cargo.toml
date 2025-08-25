@@ -1,6 +1,6 @@
 [package]
 name = "optarray"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 authors = ["Nathan Fiedler <nathanfiedler@fastmail.fm>"]
 description = "Resizable Arrays in Optimal Space and Time"
