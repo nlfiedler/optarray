@@ -440,20 +440,13 @@ impl<T> OptimalArray<T> {
         }
 
         // deallocate all data blocks using the index as the source of truth
-        let mut blocks_dealloced = 0;
         for (block, ptr) in self.index.iter().enumerate() {
             let block_len = datablock_capacity_for_block(block);
             let layout = Layout::array::<T>(block_len).expect("unexpected overflow");
             unsafe {
                 dealloc(*ptr as *mut u8, layout);
             }
-            blocks_dealloced += 1;
         }
-        assert_eq!(
-            blocks_dealloced,
-            self.index.len(),
-            "block deallocation failure"
-        );
         self.index.clear();
     }
 
