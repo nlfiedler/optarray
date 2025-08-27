@@ -37,6 +37,15 @@ fn benchmark_optarray(size: usize) {
     }
     let duration = start.elapsed();
     println!("optarray ordered: {:?}", duration);
+
+    // test popping all elements from the array
+    let start = Instant::now();
+    while !coll.is_empty() {
+        coll.pop();
+    }
+    let duration = start.elapsed();
+    println!("optarray pop-all: {:?}", duration);
+    println!("optarray capacity: {}", coll.capacity());
 }
 
 fn benchmark_vector(size: usize) {
@@ -66,6 +75,15 @@ fn benchmark_vector(size: usize) {
     }
     let duration = start.elapsed();
     println!("vector ordered: {:?}", duration);
+
+    // test popping all elements from the vector
+    let start = Instant::now();
+    while !coll.is_empty() {
+        coll.pop();
+    }
+    let duration = start.elapsed();
+    println!("vector pop-all: {:?}", duration);
+    println!("vector capacity: {}", coll.capacity());
 }
 
 fn main() {
