@@ -12,7 +12,11 @@
 //! # Memory Usage
 //!
 //! An empty resizable array is approximately 88 bytes in size, and while
-//! holding elements it will have an overhead space cost on the order of O(√N).
+//! holding elements it will have a space overhead on the order of O(√N). As
+//! elements are added the array will grow by allocating additional data blocks.
+//! Likewise, as elements are removed from the end of the array, data blocks
+//! will be deallocated as they become empty. At most one empty data block will
+//! be retained.
 //!
 //! # Performance
 //!
@@ -27,7 +31,6 @@
 //! pointers, and de-allocating memory as needed, there are many `unsafe` blocks
 //! throughout the code.
 
-#![allow(dead_code)]
 use std::alloc::{Layout, alloc, dealloc, handle_alloc_error};
 use std::fmt;
 use std::ops::{Index, IndexMut};
