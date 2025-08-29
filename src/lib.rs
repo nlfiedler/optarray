@@ -75,15 +75,22 @@ fn datablock_capacity_for_block(d: usize) -> usize {
 /// Compute the data block and element offsets (0-based) within the array for
 /// the element identified by the zero-based index `i`.
 fn locate(i: usize) -> (usize, usize) {
-    // Locate, from Algorithm 3 of the Broknik 1999 paper
+    // Locate, from Algorithm 3 of the Brodnik 1999 paper
     //
-    // adding one presumably makes the math and logic easier
+    // The operations below are meant to operate on the number of items at the
+    // index i, not the zero-based index itself, so add one. In particular,
+    // finding the appropriate superblock requires using 1-based offsets.
     let r = i + 1;
     // k is the superblock that contains the data block
     let k = (USIZE_BITS - r.leading_zeros()) - 1;
     // skc is the element capacity of superblock k and also happens to be useful
     // for masking the leading 1-bit in the value for r
     let skc = 1 << k;
+    //
+    // k.div_ceil(2) is apparently faster than (k + 1) >> 1 but using 2.pow(k)
+    // is multiple times slower than bit shifting, so something special is
+    // happening with the / and div_ceil operations (for both ARM and x86)
+    //
     let k2 = k.div_ceil(2);
     let k2s = (1 << k2) - 1;
     // b is the relative offset of the data block within superblock k
@@ -91,7 +98,7 @@ fn locate(i: usize) -> (usize, usize) {
     // e is the relative offset of the element within data block b
     let e = r & k2s;
     //
-    // The Broknik 1999 paper suggests p = 2^k - 1 (see Algorithm 3, step 3) but
+    // The Brodnik 1999 paper suggests p = 2^k - 1 (see Algorithm 3, step 3) but
     // that is actually the number of elements prior to superblock k. Instead,
     // we need to sum two geometric series to get the result.
     //
@@ -107,6 +114,11 @@ fn locate(i: usize) -> (usize, usize) {
     // floating point conversion.
     //
     let p = (1 << (k / 2)) - 1 + k2s;
+    //
+    // In theory this should be faster but apparently it is not, even if you
+    // replace every division and div_ceil with bit shifts, it is slower.
+    //
+    // let p = ((1 << (k >> 1)) * (2 + (k & 1)) - 2) as usize;
     (p + b, e)
 }
 
@@ -199,7 +211,7 @@ impl<T> OptimalArray<T> {
     ///
     /// Constant time.
     pub fn push(&mut self, value: T) {
-        // Grow, from Algorithm 1 of Broknik 1999 paper
+        // Grow, from Algorithm 1 of Brodnik 1999 paper
         //
         // 1. If the last non-empty data block is full:
         if self.last_db_capacity == self.last_db_length {
@@ -372,7 +384,7 @@ impl<T> OptimalArray<T> {
                 self.n
             );
         }
-        // retreive the value at index before overwriting
+        // retrieve the value at index before overwriting
         let (block, slot) = locate(index);
         unsafe {
             let index_ptr = self.index[block].add(slot);
@@ -457,7 +469,7 @@ impl<T> OptimalArray<T> {
     /// the reduced length of the array, possibly deallocating data blocks and
     /// shrinking the index.
     fn shrink(&mut self) {
-        // Shrink, from Algorithm 2 of Broknik 1999 paper
+        // Shrink, from Algorithm 2 of Brodnik 1999 paper
         //
         // 1. Decrement n and num elements in last non-empty data block
         self.n -= 1;
@@ -1015,7 +1027,7 @@ mod tests {
     }
 
     #[test]
-    fn test_array_fromiterator() {
+    fn test_array_from_iterator() {
         let mut inputs: Vec<i32> = Vec::new();
         for value in 0..10_000 {
             inputs.push(value);
@@ -1047,7 +1059,7 @@ mod tests {
     }
 
     #[test]
-    fn test_array_intoiterator() {
+    fn test_array_into_iterator() {
         // an array that only requires a single segment
         let inputs = [
             "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
@@ -1063,7 +1075,7 @@ mod tests {
     }
 
     #[test]
-    fn test_array_intoiterator_drop_tiny() {
+    fn test_array_into_iterator_drop_tiny() {
         // an array that only requires a single segment and only some need to be
         // dropped after partially iterating the values
         let inputs = [
@@ -1082,10 +1094,10 @@ mod tests {
     }
 
     #[test]
-    fn test_array_intoiterator_drop_large() {
+    fn test_array_into_iterator_drop_large() {
         // by adding 512 values and iterating less than 64 times, there will be
         // values in the first segment and some in the last segment, and two
-        // segments inbetween that all need to be dropped
+        // segments in-between that all need to be dropped
         let mut sut: OptimalArray<String> = OptimalArray::new();
         for _ in 0..512 {
             let value = ulid::Ulid::new().to_string();
