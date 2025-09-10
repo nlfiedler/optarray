@@ -7,7 +7,7 @@
 //! 1999.
 //!
 //! * Online ISBN 978-3-540-48447-9
-//! * https://doi.org/10.1137/23M1575792
+//! * <https://doi.org/10.1137/23M1575792>
 //!
 //! # Memory Usage
 //!
@@ -16,7 +16,7 @@
 //! elements are added the array will grow by allocating additional data blocks.
 //! Likewise, as elements are removed from the end of the array, data blocks
 //! will be deallocated as they become empty. At most one empty data block will
-//! be retained.
+//! be retained as an optimization.
 //!
 //! # Performance
 //!
@@ -205,7 +205,7 @@ impl<T> OptimalArray<T> {
     ///
     /// # Panics
     ///
-    /// Panics if a new segment is allocated that would exceed `isize::MAX` _bytes_.
+    /// Panics if a new block is allocated that would exceed `isize::MAX` _bytes_.
     ///
     /// # Time complexity
     ///
@@ -409,7 +409,7 @@ impl<T> OptimalArray<T> {
     }
 
     /// Clears the extensible array, removing and dropping all values and
-    /// deallocating all previously allocated segments.
+    /// deallocating all previously allocated blocks.
     ///
     /// # Time complexity
     ///
@@ -486,8 +486,8 @@ impl<T> OptimalArray<T> {
                     dealloc(ptr as *mut u8, layout);
                 }
             }
-            // leave this last empty data block in case more pushes occur
-            // and we would soon be allocating the same sized block again
+            // leave this last empty data block in case more pushes occur and we
+            // would soon be allocating the same sized block again
             self.empty = 1;
             // (b) If the index block is quarter full, shrink to half
             if self.index.len() * 4 <= self.index.capacity() {
@@ -640,7 +640,7 @@ impl<T> Drop for OptArrayIntoIter<T> {
             let (first_block, first_slot) = locate(self.cursor);
             let (last_block, last_slot) = locate(self.n - 1);
             if first_block == last_block {
-                // special-case, remaining values are in only one segment
+                // special-case, remaining values are in only one block
                 if first_slot <= last_slot {
                     unsafe {
                         // last_slot is pointing at the last element, need to
@@ -824,7 +824,7 @@ mod tests {
 
     #[test]
     fn test_clear_and_reuse_tiny() {
-        // clear an array that allocated only one segment
+        // clear an array that allocated only one block
         let mut sut: OptimalArray<String> = OptimalArray::new();
         sut.push(String::from("one"));
         assert_eq!(sut.len(), 1);
@@ -932,6 +932,26 @@ mod tests {
         }
         for (idx, elem) in sut.iter().enumerate() {
             assert_eq!(inputs[idx], elem);
+        }
+    }
+
+    #[test]
+    fn test_push_many_pop_all_verify() {
+        // push many values, then pop all off and verify
+        let mut sut: OptimalArray<usize> = OptimalArray::new();
+        for value in 0..16384 {
+            sut.push(value);
+        }
+        for value in (0..16384).rev() {
+            assert_eq!(sut.pop(), Some(value));
+        }
+
+        // and do it again to be sure shrinking works correctly
+        for value in 0..16384 {
+            sut.push(value);
+        }
+        for value in (0..16384).rev() {
+            assert_eq!(sut.pop(), Some(value));
         }
     }
 
@@ -1060,7 +1080,7 @@ mod tests {
 
     #[test]
     fn test_array_into_iterator() {
-        // an array that only requires a single segment
+        // an array that only requires a single block
         let inputs = [
             "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
         ];
@@ -1076,7 +1096,7 @@ mod tests {
 
     #[test]
     fn test_array_into_iterator_drop_tiny() {
-        // an array that only requires a single segment and only some need to be
+        // an array that only requires a single block and only some need to be
         // dropped after partially iterating the values
         let inputs = [
             "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
@@ -1096,8 +1116,8 @@ mod tests {
     #[test]
     fn test_array_into_iterator_drop_large() {
         // by adding 512 values and iterating less than 64 times, there will be
-        // values in the first segment and some in the last segment, and two
-        // segments in-between that all need to be dropped
+        // values in the first block and some in the last block, and two blocks
+        // in-between that all need to be dropped
         let mut sut: OptimalArray<String> = OptimalArray::new();
         for _ in 0..512 {
             let value = ulid::Ulid::new().to_string();
@@ -1112,7 +1132,7 @@ mod tests {
     }
 
     #[test]
-    fn test_swap_remove_single_segment() {
+    fn test_swap_remove_single_block() {
         let mut sut: OptimalArray<u32> = OptimalArray::new();
         sut.push(1);
         assert_eq!(sut.len(), 1);
@@ -1122,7 +1142,7 @@ mod tests {
     }
 
     #[test]
-    fn test_swap_remove_multiple_segments() {
+    fn test_swap_remove_multiple_blocks() {
         let mut sut: OptimalArray<u32> = OptimalArray::new();
         for value in 0..512 {
             sut.push(value);
