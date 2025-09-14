@@ -20,7 +20,7 @@
 //!
 //! # Performance
 //!
-//! Most operations are either constant time, or log2 or sqrt of the collection
+//! Most operations are either constant time, log2, or sqrt of the collection
 //! size. However, the lookup operation involves numerous calculations and as
 //! such the overall performance will be worse than `Vec`. The difference will
 //! be in substantially reduced memory overhead.
@@ -39,37 +39,15 @@ use std::ops::{Index, IndexMut};
 /// value for `k` for a given zero-based index `i` into the array.
 const USIZE_BITS: u32 = (8 * std::mem::size_of::<usize>()) as u32;
 
-/// Maps the highest numbered data block to a given capacity. Computing this
-/// would be a challenge given how many steps are involved to go from k to p, b,
-/// and e in the locate function.
-const BLOCK_SIZES: [(usize, usize); 17] = [
-    (1, 1),
-    (4, 2),
-    (10, 4),
-    (22, 8),
-    (46, 16),
-    (94, 32),
-    (190, 64),
-    (382, 128),
-    (766, 256),
-    (1534, 512),
-    (3070, 1024),
-    (6142, 2048),
-    (12286, 4096),
-    (24574, 8192),
-    (49150, 16384),
-    (98302, 32768),
-    (131070, 65536),
-];
-
 /// Determine the capacity for the data block at index d.
 fn datablock_capacity_for_block(d: usize) -> usize {
-    for (max, len) in BLOCK_SIZES {
-        if d < max {
-            return len;
-        }
-    }
-    panic!("overflow, block out of bounds")
+    // Unstated in the paper, the number of data blocks in each super block is a
+    // Thabit number minus one.
+    let j = (d + 1).div_ceil(3);
+    let k = (USIZE_BITS - j.leading_zeros() - 1) as usize;
+    let t = 3 * (1 << k) - 2;
+    let n = if d >= t { k + 1 } else { k };
+    1 << n
 }
 
 /// Compute the data block and element offsets (0-based) within the array for
@@ -142,23 +120,6 @@ fn blocks_before_super(k: usize) -> usize {
     (1 << (k / 2)) + (1 << k.div_ceil(2)) - 2
 }
 
-/// Compute the capacity for an array with `s` superblocks and `d` data blocks.
-fn array_capacity(s: usize, d: usize) -> usize {
-    if s == 0 {
-        // array is completely empty, math fails here
-        0
-    } else {
-        let k = s - 1;
-        // compute the number of data blocks before superblock k
-        let leading_blocks = blocks_before_super(k);
-        // compute the element capacity prior to superblock k
-        let leading_capacity = (1 << k) - 1;
-        let block_capacity = datablock_capacity(k);
-        // compute capacity of allocated blocks in this superblock
-        (d - leading_blocks) * block_capacity + leading_capacity
-    }
-}
-
 /// Resizable array in optimal space and time (in theory).
 pub struct OptimalArray<T> {
     // holds pointers to data blocks
@@ -217,16 +178,16 @@ impl<T> OptimalArray<T> {
         if self.last_db_capacity == self.last_db_length {
             // (a) If the last superblock is full:
             if self.last_sb_capacity == self.last_sb_length {
-                // i. Increment s
-                self.s += 1;
                 // ii. and iii. in the paper seem to assume that the capacity
                 // values are not set to zero initially, but that seems
                 // inconsistent with the rest of the logic in this algorithm.
                 // Instead, we calculate the capacity for both every time.
-                self.last_sb_capacity = superblock_capacity(self.s - 1);
-                self.last_db_capacity = datablock_capacity(self.s - 1);
+                self.last_sb_capacity = superblock_capacity(self.s);
+                self.last_db_capacity = datablock_capacity(self.s);
                 // iv. Set occupancy of last superblock to empty
                 self.last_sb_length = 0;
+                // i. Increment s
+                self.s += 1;
             }
             // (b) If there are no empty data blocks:
             if self.empty == 0 {
@@ -271,7 +232,7 @@ impl<T> OptimalArray<T> {
     ///
     /// Constant time.
     pub fn push_within_capacity(&mut self, value: T) -> Result<(), T> {
-        if array_capacity(self.s, self.d) <= self.n {
+        if self.capacity() <= self.n {
             Err(value)
         } else {
             self.push(value);
@@ -328,7 +289,23 @@ impl<T> OptimalArray<T> {
     ///
     /// Constant time.
     pub fn capacity(&self) -> usize {
-        array_capacity(self.s, self.d)
+        // array_capacity(self.s, self.index.len())
+        if self.s == 0 && self.d == 0 && self.empty == 0 {
+            // array is completely empty
+            0
+        } else if self.s == 0 && self.d == 0 {
+            // there is just the one 1-sized data block remaining
+            1
+        } else {
+            let k = self.s - 1;
+            // compute the number of data blocks before superblock k
+            let leading_blocks = blocks_before_super(k);
+            // compute the element capacity prior to superblock k
+            let leading_capacity = (1 << k) - 1;
+            let block_capacity = datablock_capacity(k);
+            // compute capacity of allocated blocks in this superblock
+            (self.d - leading_blocks) * block_capacity + leading_capacity
+        }
     }
 
     /// Returns true if the array has a length of 0.
@@ -763,12 +740,23 @@ mod tests {
         let mut sut: OptimalArray<u64> = OptimalArray::new();
         assert_eq!(sut.len(), 0);
         assert_eq!(sut.capacity(), 0);
+        sut.push(1);
+        assert_eq!(sut.len(), 1);
+        assert_eq!(sut.capacity(), 1);
+        sut.pop();
+        assert_eq!(sut.len(), 0);
+        assert_eq!(sut.capacity(), 1);
         for value in 0..12 {
             sut.push(value);
         }
         assert_eq!(sut.len(), 12);
         // 1 + 2 + 4 + 8
         assert_eq!(sut.capacity(), 15);
+        while !sut.is_empty() {
+            sut.pop();
+        }
+        assert_eq!(sut.len(), 0);
+        assert_eq!(sut.capacity(), 1);
     }
 
     #[test]
@@ -963,22 +951,28 @@ mod tests {
         // data block (push enough to reach superblock 6, then pop enough to get
         // to superblock 5, then push again)
         let mut sut: OptimalArray<usize> = OptimalArray::new();
+        assert_eq!(sut.len(), 0);
+        assert_eq!(sut.capacity(), 0);
         for value in 0..35 {
             sut.push(value);
         }
         assert_eq!(sut.len(), 35);
+        assert_eq!(sut.capacity(), 39);
         for _ in 0..5 {
             sut.pop();
         }
         assert_eq!(sut.len(), 30);
+        assert_eq!(sut.capacity(), 31);
         for _ in 0..5 {
             sut.pop();
         }
         assert_eq!(sut.len(), 25);
+        assert_eq!(sut.capacity(), 27);
         for value in 25..37 {
             sut.push(value);
         }
         assert_eq!(sut.len(), 37);
+        assert_eq!(sut.capacity(), 39);
         for (idx, elem) in sut.iter().enumerate() {
             assert_eq!(idx, *elem);
         }
@@ -1022,7 +1016,7 @@ mod tests {
             sut.pop();
         }
         assert_eq!(sut.len(), 0);
-        assert_eq!(sut.capacity(), 0);
+        assert_eq!(sut.capacity(), 1);
         for item in inputs {
             sut.push(item.to_owned());
         }
@@ -1231,12 +1225,6 @@ mod tests {
         assert_eq!(datablock_capacity_for_block(49000), 16384);
         assert_eq!(datablock_capacity_for_block(98000), 32768);
         assert_eq!(datablock_capacity_for_block(100001), 65536);
-    }
-
-    #[test]
-    #[should_panic(expected = "overflow, block out of bounds")]
-    fn test_datablock_capacity_for_block_bounds() {
-        datablock_capacity_for_block(150_000);
     }
 
     #[test]
