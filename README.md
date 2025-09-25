@@ -14,6 +14,9 @@ This is part of a collection of similar data structures:
 * [Extensible Arrays](https://github.com/nlfiedler/extarray)
     - Similar O(√N) space overhead and similar O(1) running time for most operations
     - Slower than Optimal Arrays for repeated pushes but faster for ordered/random access
+* [Optimal Arrays (Tarjan and Zwick)](https://github.com/nlfiedler/tzarrays)
+    - O(rN^1/r) space overhead and similar O(1) running time for most operations
+    - Copying during grow/shrink adds significant time to overall performance
 * [Segment Array](https://github.com/nlfiedler/segarray)
     - Grows geometrically like `Vec`, hence O(N) space overhead
     - Faster than Optimal Arrays for repeated pushes and ordered/random access
