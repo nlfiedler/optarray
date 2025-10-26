@@ -41,8 +41,8 @@ const USIZE_BITS: u32 = (8 * std::mem::size_of::<usize>()) as u32;
 
 /// Determine the capacity for the data block at index d.
 fn datablock_capacity_for_block(d: usize) -> usize {
-    // Unstated in the paper, the number of data blocks in each super block is a
-    // Thabit number minus one.
+    // Unstated in the paper, the number of data blocks of the same size is
+    // a Thabit number plus one.
     let j = (d + 1).div_ceil(3);
     let k = (USIZE_BITS - j.leading_zeros() - 1) as usize;
     let t = 3 * (1 << k) - 2;
