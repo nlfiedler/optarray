@@ -63,4 +63,5 @@ fn main() {
             break;
         }
     }
+    println!("optimal array tests complete");
 }

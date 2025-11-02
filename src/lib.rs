@@ -613,7 +613,7 @@ impl<T> Drop for OptArrayIntoIter<T> {
     fn drop(&mut self) {
         use std::ptr::{drop_in_place, slice_from_raw_parts_mut};
 
-        if std::mem::needs_drop::<T>() {
+        if self.n > 0 && std::mem::needs_drop::<T>() {
             let (first_block, first_slot) = locate(self.cursor);
             let (last_block, last_slot) = locate(self.n - 1);
             if first_block == last_block {
@@ -1086,6 +1086,12 @@ mod tests {
             assert_eq!(inputs[idx], elem);
         }
         // sut.len(); // error: ownership of sut was moved
+    }
+
+    #[test]
+    fn test_into_iterator_drop_empty() {
+        let sut: OptimalArray<String> = OptimalArray::new();
+        assert_eq!(sut.into_iter().count(), 0);
     }
 
     #[test]
