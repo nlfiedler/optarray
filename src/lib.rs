@@ -628,7 +628,7 @@ impl<T> Drop for OptArrayIntoIter<T> {
                         ));
                     }
                 }
-            } else {
+            } else if first_block < last_block {
                 // drop the remaining values in the first block
                 let block_len = datablock_capacity_for_block(first_block);
                 if block_len < self.n {
@@ -1092,6 +1092,20 @@ mod tests {
     fn test_into_iterator_drop_empty() {
         let sut: OptimalArray<String> = OptimalArray::new();
         assert_eq!(sut.into_iter().count(), 0);
+    }
+
+    #[test]
+    fn test_array_into_iterator_edge_case() {
+        // iterate to the end (of the last data block)
+        let inputs = ["one", "two", "three", "four", "five", "six", "seven"];
+        let mut sut: OptimalArray<String> = OptimalArray::new();
+        for item in inputs {
+            sut.push(item.to_owned());
+        }
+        for (idx, elem) in sut.into_iter().enumerate() {
+            assert_eq!(inputs[idx], elem);
+        }
+        // sut.len(); // error: ownership of sut was moved
     }
 
     #[test]
